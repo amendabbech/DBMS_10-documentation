@@ -1,0 +1,277 @@
+% ============================================================
+%  TERM PROJECT – DOCUMENTATION
+%  Databases · THGA Bochum
+%
+%  Blutspende-Verwaltungssystem (Blood Donation Management System)
+% ============================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{thga-db}
+
+\renewcommand{\thgaKurs}{Databases}
+\renewcommand{\thgaDatum}{Summer Term 2026}
+
+\begin{document}
+\thispagestyle{empty}
+\thgaTitel{Term Project -- Documentation}%
+{Blutspende-Verwaltungssystem: a blood donation management system}
+
+\begin{infobox}
+\textbf{Author:} Amen Dabbech \\
+\textbf{Module:} Introduction to Database Management Systems · THGA Bochum \\
+\textbf{Stack:} PostgreSQL · FastAPI · Docker Compose · Python CLI (\texttt{.deb}) \\
+\textbf{Repository:} \url{https://github.com/amendabbech/DBMS_10}
+\end{infobox}
+
+\tableofcontents
+\vspace{1em}
+
+% ============================================================
+\section{Introduction and motivation}
+% ============================================================
+
+Blood donation centers often coordinate donors and appointments manually or
+with simple spreadsheets. This makes it hard to enforce basic safety rules,
+such as the mandatory waiting period between two donations by the same donor,
+and to answer questions such as \emph{``which donors are currently eligible to
+donate again?''} without manual checking.
+
+\textbf{Blutspende-Verwaltungssystem} replaces this manual process with a
+proper relational system. It manages \textbf{Spender} (donors),
+\textbf{Spendezentren} (donation centers) and \textbf{Spenden} (donations),
+exposes the data through a REST API, and offers a small command-line frontend
+for staff.
+
+\begin{beispielbox}
+\textbf{Usage scenario.} A donor arrives at a donation center to give blood.
+Staff open the client, look up the donor, and register a new donation with
+date, blood type and amount. The system automatically rejects the donation if
+the donor's last donation was less than 56 days ago, enforcing the safety rule
+without any manual date calculation.
+\end{beispielbox}
+
+% ============================================================
+\section{Data model}
+% ============================================================
+
+The domain has three entity types. A \textbf{Spender} can give many
+\textbf{Spenden} over time at different \textbf{Spendezentren}, and a
+Spendezentrum can host donations from many donors -- an \texttt{N:M}
+relationship between Spender and Spendezentrum that is resolved by the
+\textbf{Spende} entity.
+
+\begin{beispielbox}
+\textbf{ER model (textual).}
+\begin{itemize}[leftmargin=1.4em, topsep=2pt]
+  \item \textbf{Spender} (1) \;--\; gives \;--\; (N) \textbf{Spende}
+  \item \textbf{Spendezentrum} (1) \;--\; hosts \;--\; (N) \textbf{Spende}
+\end{itemize}
+Thus \textbf{Spender} \texttt{N:M} \textbf{Spendezentrum}, resolved through
+\textbf{Spende}.
+\end{beispielbox}
+
+\subsection{Relational schema}
+
+Derived from the ER model, with primary keys underlined and foreign keys in
+italics:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \texttt{spender}(\underline{spender\_id}, vorname, nachname,
+        geburtsdatum, blutgruppe, email)
+  \item \texttt{spendezentrum}(\underline{zentrum\_id}, name, adresse, stadt)
+  \item \texttt{spende}(\underline{spende\_id}, \emph{spender\_id},
+        \emph{zentrum\_id}, spende\_datum, menge\_ml)
+\end{itemize}
+
+\textbf{Normalisation.} Every non-key attribute depends only on the whole
+primary key of its table, and there are no transitive dependencies: a donor's
+email lives only in \texttt{spender}, a center's address only in
+\texttt{spendezentrum}, and a donation references donors and centers by their
+keys rather than duplicating their data. The schema is therefore in
+\textbf{3NF}.
+
+% ============================================================
+\section{Database (PostgreSQL)}
+% ============================================================
+
+The schema is created by an init script that PostgreSQL runs on first start,
+via a Docker volume mount. In addition to the three tables, a
+\textbf{trigger} enforces the core business rule of the domain: a donor may
+not donate again within 56 days of their last donation.
+
+\begin{lstlisting}[language=SQL, caption={schema.sql (excerpt) -- tables and 56-day trigger}]
+CREATE TABLE spender (
+    spender_id SERIAL PRIMARY KEY,
+    vorname VARCHAR(100) NOT NULL,
+    nachname VARCHAR(100) NOT NULL,
+    geburtsdatum DATE NOT NULL,
+    blutgruppe VARCHAR(3) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL
+);
+
+CREATE TABLE spendezentrum (
+    zentrum_id SERIAL PRIMARY KEY,
+    name VARCHAR(150) NOT NULL,
+    adresse VARCHAR(255) NOT NULL,
+    stadt VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE spende (
+    spende_id SERIAL PRIMARY KEY,
+    spender_id INTEGER NOT NULL REFERENCES spender(spender_id),
+    zentrum_id INTEGER NOT NULL REFERENCES spendezentrum(zentrum_id),
+    spende_datum DATE NOT NULL,
+    menge_ml INTEGER NOT NULL CHECK (menge_ml > 0)
+);
+
+CREATE OR REPLACE FUNCTION pruefe_spendeabstand()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM spende
+        WHERE spender_id = NEW.spender_id
+        AND spende_datum > NEW.spende_datum - INTERVAL '56 days'
+        AND spende_datum < NEW.spende_datum + INTERVAL '56 days'
+    ) THEN
+        RAISE EXCEPTION 'Mindestabstand von 56 Tagen nicht eingehalten';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_spendeabstand
+BEFORE INSERT ON spende
+FOR EACH ROW
+EXECUTE FUNCTION pruefe_spendeabstand();
+\end{lstlisting}
+
+% ============================================================
+\section{REST API (FastAPI)}
+% ============================================================
+
+The API is the only component that talks to the database. Read endpoints are
+public; write endpoints require the header \texttt{X-API-Key}.
+
+\renewcommand{\arraystretch}{1.2}
+\begin{tabularx}{\linewidth}{@{}p{1.6cm}p{4.4cm}Xc@{}}
+\toprule
+\textbf{Method} & \textbf{Path} & \textbf{Purpose} & \textbf{Key} \\
+\midrule
+\texttt{GET}  & \texttt{/spender} & list all donors & -- \\
+\texttt{POST} & \texttt{/spender} & register a new donor & yes \\
+\texttt{GET}  & \texttt{/spendezentrum} & list all donation centers & -- \\
+\texttt{POST} & \texttt{/spendezentrum} & register a new center & yes \\
+\texttt{GET}  & \texttt{/spende} & list all donations & -- \\
+\texttt{POST} & \texttt{/spende} & register a new donation & yes \\
+\bottomrule
+\end{tabularx}
+
+\medskip
+The \texttt{POST /spende} endpoint demonstrates how a database-level
+\textbf{constraint} (the 56-day trigger) is surfaced as a clean API error
+instead of a raw database exception:
+
+\begin{lstlisting}[language=Python, caption={POST /spende -- catching the trigger's exception}]
+@app.post("/spende")
+def create_spende(spende: SpendeIn, auth: None = Depends(check_api_key)):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute(
+            "INSERT INTO spende (spender_id, zentrum_id, spende_datum, menge_ml) "
+            "VALUES (%s, %s, %s, %s) RETURNING *",
+            (spende.spender_id, spende.zentrum_id,
+             spende.spende_datum, spende.menge_ml)
+        )
+        new_row = cur.fetchone()
+        conn.commit()
+        return new_row
+    except psycopg2.Error as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+\end{lstlisting}
+
+The write path is guarded by a simple dependency that checks the API key:
+
+\begin{lstlisting}[language=Python, caption={API-key guard}]
+API_KEY = "geheimschluessel123"
+
+def check_api_key(x_api_key: str = Header(...)):
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Ungueltiger API-Key")
+\end{lstlisting}
+
+% ============================================================
+\section{Frontend (Python CLI, packaged as .deb)}
+% ============================================================
+
+The frontend is a small command-line client with a numbered menu offering six
+actions: list and create Spender, Spendezentrum and Spende. It never touches
+the database directly -- it only calls the API via HTTP.
+
+\textbf{Packaging.} The client script is wrapped into a Debian package with a
+minimal \texttt{DEBIAN/control} file and installed as a system-wide command:
+
+\begin{lstlisting}[caption={Building and installing the .deb}]
+mkdir -p blutspende-client/DEBIAN
+mkdir -p blutspende-client/usr/local/bin
+cp client.py blutspende-client/usr/local/bin/blutspende-client
+chmod +x blutspende-client/usr/local/bin/blutspende-client
+dpkg-deb --build blutspende-client
+sudo dpkg -i blutspende-client.deb
+\end{lstlisting}
+
+After installation, the client is available system-wide as the
+\texttt{blutspende-client} command.
+
+% ============================================================
+\section{Operation and deployment}
+% ============================================================
+
+The backend runs as a PostgreSQL container orchestrated by Docker Compose. The
+schema is loaded automatically from a mounted SQL file on first start.
+
+\begin{lstlisting}[caption={docker-compose.yml (excerpt)}]
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dbms10
+      POSTGRES_PASSWORD: dbms10pass
+      POSTGRES_DB: blutspende
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./system/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+\end{lstlisting}
+
+\textbf{Deployment steps.}
+\begin{enumerate}[leftmargin=1.6em, topsep=2pt]
+  \item \texttt{docker-compose up -d} -- start the database.
+  \item \texttt{uvicorn main:app --host 0.0.0.0 --port 8000} -- start the API.
+  \item \texttt{sudo dpkg -i blutspende-client.deb} -- install the frontend.
+  \item Run \texttt{blutspende-client} to interact with the system.
+\end{enumerate}
+
+% ============================================================
+\section{Reflection}
+% ============================================================
+
+The separation into database, API and CLI client made the 56-day business
+rule easy to verify independently at each layer: first directly in
+PostgreSQL via \texttt{psql}, then through the API with \texttt{curl}, and
+finally through the client itself. The trickiest part was choosing where to
+enforce the rule -- a database trigger was chosen over an application-level
+check so that the constraint holds regardless of which client inserts data.
+Given more time, a dedicated endpoint to check a donor's eligibility date in
+advance (instead of only rejecting at insert time) would improve the user
+experience.
+
+\end{document}
