@@ -17,10 +17,12 @@
 {Blutspende-Verwaltungssystem: a blood donation management system}
 
 \begin{infobox}
-\textbf{Author:} Amen Dabbech \\
+\textbf{Author:} Amen Allah Dabbech \\
 \textbf{Module:} Introduction to Database Management Systems · THGA Bochum \\
-\textbf{Stack:} PostgreSQL · FastAPI · Docker Compose · Python CLI (\texttt{.deb}) \\
-\textbf{Repository:} \url{https://github.com/amendabbech/DBMS_10}
+\textbf{Stack:} PostgreSQL · FastAPI · Docker Compose · tkinter GUI (\texttt{.deb}) \\
+\textbf{Repository:} \url{https://github.com/amendabbech/DBMS_10} \\
+\textbf{Documentation:} \url{https://github.com/amendabbech/DBMS_10-documentation} \\
+\textbf{Video:} \url{https://www.youtube.com/watch?v=ZdpA3hDtjVw}
 \end{infobox}
 
 \tableofcontents
@@ -39,14 +41,14 @@ donate again?''} without manual checking.
 \textbf{Blutspende-Verwaltungssystem} replaces this manual process with a
 proper relational system. It manages \textbf{Spender} (donors),
 \textbf{Spendezentren} (donation centers) and \textbf{Spenden} (donations),
-exposes the data through a REST API, and offers a small command-line frontend
-for staff.
+exposes the data through a REST API, and offers a small desktop GUI for
+staff.
 
 \begin{beispielbox}
 \textbf{Usage scenario.} A donor arrives at a donation center to give blood.
-Staff open the client, look up the donor, and register a new donation with
-date, blood type and amount. The system automatically rejects the donation if
-the donor's last donation was less than 56 days ago, enforcing the safety rule
+Staff open the desktop app, look up the donor, and register a new donation
+with date and amount. The system automatically rejects the donation if the
+donor's last donation was less than 56 days ago, enforcing the safety rule
 without any manual date calculation.
 \end{beispielbox}
 
@@ -205,27 +207,47 @@ def check_api_key(x_api_key: str = Header(...)):
 \end{lstlisting}
 
 % ============================================================
-\section{Frontend (Python CLI, packaged as .deb)}
+\section{Frontend (tkinter GUI, packaged as .deb)}
 % ============================================================
 
-The frontend is a small command-line client with a numbered menu offering six
-actions: list and create Spender, Spendezentrum and Spende. It never touches
-the database directly -- it only calls the API via HTTP.
+The frontend is a desktop GUI built with tkinter. On startup, a modal
+\textbf{connection dialog} asks for the API URL and the \texttt{X-API-Key};
+neither is written to disk, only kept in memory for the session.
 
-\textbf{Packaging.} The client script is wrapped into a Debian package with a
-minimal \texttt{DEBIAN/control} file and installed as a system-wide command:
+The main window has three tabs -- \textbf{Spender}, \textbf{Spendezentrum}
+and \textbf{Spende} -- each with a scrollable list and a form to create new
+entries. The frontend never touches the database directly; it only calls
+the REST API via the \texttt{requests} library, following the API/UI
+separation taught in the lecture (\texttt{api.py} contains no tkinter code,
+\texttt{ui.py} contains no \texttt{requests} calls).
 
-\begin{lstlisting}[caption={Building and installing the .deb}]
-mkdir -p blutspende-client/DEBIAN
-mkdir -p blutspende-client/usr/local/bin
-cp client.py blutspende-client/usr/local/bin/blutspende-client
-chmod +x blutspende-client/usr/local/bin/blutspende-client
-dpkg-deb --build blutspende-client
-sudo dpkg -i blutspende-client.deb
+\begin{lstlisting}[language=Python, caption={Connection dialog (excerpt)}]
+class ConnectionDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Tk):
+        super().__init__(parent)
+        self.title("Mit API verbinden")
+        self.grab_set()  # modal
+        ...
+        self.wait_window()
 \end{lstlisting}
 
-After installation, the client is available system-wide as the
-\texttt{blutspende-client} command.
+\textbf{Packaging.} The project is managed with \texttt{uv} and uses the
+\texttt{src} layout. The application is frozen with PyInstaller and wrapped
+into a Debian package with \texttt{fpm}:
+
+\begin{lstlisting}[caption={Building and installing the .deb}]
+uv run pyinstaller --name db-frontend --onedir --windowed \
+    --paths src src/db_frontend/__main__.py
+mkdir -p pkg/opt/db-frontend pkg/usr/bin
+cp -r dist/db-frontend/* pkg/opt/db-frontend/
+ln -s /opt/db-frontend/db-frontend pkg/usr/bin/db-frontend
+fpm -s dir -t deb --name db-frontend --version 0.1.0 \
+    --architecture amd64 -C pkg .
+sudo dpkg -i db-frontend_0.1.0_amd64.deb
+\end{lstlisting}
+
+After installation, the application is available system-wide as the
+\texttt{db-frontend} command.
 
 % ============================================================
 \section{Operation and deployment}
@@ -256,18 +278,18 @@ volumes:
 \begin{enumerate}[leftmargin=1.6em, topsep=2pt]
   \item \texttt{docker-compose up -d} -- start the database.
   \item \texttt{uvicorn main:app --host 0.0.0.0 --port 8000} -- start the API.
-  \item \texttt{sudo dpkg -i blutspende-client.deb} -- install the frontend.
-  \item Run \texttt{blutspende-client} to interact with the system.
+  \item \texttt{sudo dpkg -i db-frontend\_0.1.0\_amd64.deb} -- install the frontend.
+  \item Run \texttt{db-frontend} and enter the API URL and key to connect.
 \end{enumerate}
 
 % ============================================================
 \section{Reflection}
 % ============================================================
 
-The separation into database, API and CLI client made the 56-day business
-rule easy to verify independently at each layer: first directly in
+The separation into database, API and desktop client made the 56-day
+business rule easy to verify independently at each layer: first directly in
 PostgreSQL via \texttt{psql}, then through the API with \texttt{curl}, and
-finally through the client itself. The trickiest part was choosing where to
+finally through the GUI itself. The trickiest part was choosing where to
 enforce the rule -- a database trigger was chosen over an application-level
 check so that the constraint holds regardless of which client inserts data.
 Given more time, a dedicated endpoint to check a donor's eligibility date in
